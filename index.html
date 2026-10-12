@@ -1,0 +1,908 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Yankee Trader</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=VT323&family=Silkscreen:wght@400;700&display=swap">
+<style>
+/* Layout: one-screen BBS terminal. Status line on top, scrollback in the middle,
+   quick-keys and the command prompt pinned to the bottom. Deliberately single-theme: a P1 phosphor CRT. */
+:root {
+  --bg: #040905;          /* tube glass */
+  --bg-raise: #0a160c;    /* status bar, buttons */
+  --fg: #3dff7a;          /* P1 phosphor green */
+  --dim: #1d8040;         /* low-intensity text */
+  --hi: #c9ffd9;          /* bright/bold */
+  --amber: #ffb347;       /* ports, money, the title */
+  --red: #ff5f52;         /* hostiles, damage */
+  --cyan: #5fe3d8;        /* goods for sale */
+  --line: #164d27;        /* rules and borders */
+  --font-term: 'VT323', 'Courier New', ui-monospace, monospace;
+  --font-title: 'Silkscreen', 'VT323', 'Courier New', monospace;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font-family: var(--font-term); font-size: 21px; line-height: 1.15;
+  text-shadow: 0 0 6px color-mix(in srgb, var(--fg) 45%, transparent);
+}
+.crt {
+  box-sizing: border-box; height: 100%; max-width: 980px; margin: 0 auto;
+  padding-inline: 16px; padding-block: 10px 8px;
+  display: flex; flex-direction: column; gap: 8px; position: relative;
+}
+.crt::after { /* scanlines */
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 5;
+  background: repeating-linear-gradient(to bottom, transparent 0 2px, rgba(0,0,0,.28) 2px 3px);
+}
+header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 16px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+h1 {
+  margin: 0; font-family: var(--font-title); font-weight: 700; font-size: 26px; letter-spacing: .08em;
+  color: var(--amber); text-shadow: 0 0 10px color-mix(in srgb, var(--amber) 60%, transparent);
+  text-wrap: balance;
+}
+h1 small { font-family: var(--font-term); font-weight: 400; font-size: 18px; color: var(--dim); letter-spacing: 0; text-shadow: none; margin-left: 8px; }
+#status { display: flex; flex-wrap: wrap; gap: 2px 14px; font-variant-numeric: tabular-nums; color: var(--dim); }
+#status b { font-weight: 400; color: var(--hi); }
+#out {
+  flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; white-space: pre-wrap; word-break: break-word;
+  scrollbar-color: var(--line) transparent; padding-right: 4px;
+}
+#out > div { min-height: 1.15em; }
+.hi { color: var(--hi); } .dim { color: var(--dim); } .am { color: var(--amber); }
+.rd { color: var(--red); } .cy { color: var(--cyan); }
+.echo { color: var(--dim); }
+.echo .cmd { color: var(--hi); }
+.banner { color: var(--amber); }
+#keys { display: flex; flex-wrap: wrap; gap: 6px; }
+#keys button {
+  font: inherit; font-size: 19px; color: var(--fg); background: var(--bg-raise);
+  border: 1px solid var(--line); padding: 2px 9px; cursor: pointer; text-shadow: inherit;
+}
+#keys button.warp { color: var(--hi); }
+#keys button.foe { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, var(--line)); }
+#keys button.shop { color: var(--amber); }
+#keys button:hover { background: var(--line); }
+#keys button:focus-visible, #cmd:focus-visible { outline: 1px dashed var(--hi); outline-offset: 2px; }
+form { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--line); padding-top: 6px; }
+#prompt { color: var(--amber); white-space: nowrap; }
+#cmd {
+  flex: 1; min-width: 0; font: inherit; color: var(--hi); background: transparent; border: 0;
+  caret-color: var(--fg); text-shadow: inherit; padding: 2px 0; text-transform: none;
+}
+@keyframes flicker { 0%,100% { opacity: 1 } 50% { opacity: .985 } }
+.crt { animation: flicker 4s infinite; }
+@media (prefers-reduced-motion: reduce) { .crt { animation: none; } }
+@media (max-width: 520px) {
+  body { font-size: 18px; }
+  h1 { font-size: 20px; }
+  #prompt .long { display: none; }
+  h1 small { display: none; }
+}
+</style>
+</head>
+<body>
+
+<div class="crt">
+  <header>
+    <h1>YANKEE TRADER<small>node 1 &middot; 2400 baud</small></h1>
+    <div id="status" aria-live="polite"></div>
+  </header>
+  <div id="out" role="log" aria-label="Terminal output"></div>
+  <div id="keys" aria-label="Quick commands"></div>
+  <form id="f" autocomplete="off">
+    <label id="prompt" for="cmd"></label>
+    <input id="cmd" name="cmd" type="text" spellcheck="false" autocapitalize="off" autocorrect="off" enterkeyhint="send" aria-label="Command">
+  </form>
+</div>
+
+<script>
+'use strict';
+// ---------------------------------------------------------------- constants
+const SAVE_KEY = 'yankee-trader-save-v1';
+const N = 300;
+const TURNS_PER_DAY = 250;
+const COMMS = [
+  { k: 'ore', name: 'Fuel Ore',  base: 25 },
+  { k: 'org', name: 'Organics',  base: 45 },
+  { k: 'equ', name: 'Equipment', base: 80 },
+];
+// Port classes, TradeWars style: B = port buys it, S = port sells it. Order: ore, org, equ.
+const CLS = { 1: 'BBS', 2: 'BSB', 3: 'SBB', 4: 'SSB', 5: 'SBS', 6: 'BSS', 7: 'SSS', 8: 'BBB' };
+const REGIONS = ['Yankee Space', 'The Rust Reach', 'Calloway Drift', "The Widow's Veil", 'The Long Dark'];
+const PRE = ['Halvorsen','Kettle','Brannock','Okafor','Dunmore','Pell','Vashti','Corrigan','Mabry','Tolliver','Sato','Renke',
+  'Gaskill','Quill','Ashby','Marlow','Nakamura','Fenwick','Ostrova','Bellweather','Crane','Garza','Hollis','Ibarra',
+  'Juniper','Lark','Moss','Navarro','Ruiz','Tanaka','Agana','Garapan','Rota','Tinian','Kobe','Yokosuka'];
+const SUF = ['Depot','Exchange','Outpost','Yards','Market','Hold','Landing','Works','Dock','Bazaar','Refinery','Post','Junction'];
+const BARONS = [
+  { name: 'Cornelius Vane',   taunt: 'Every credit in this sector is mine, peddler. Even the ones in your pocket.' },
+  { name: 'The Widow Harrow', taunt: 'My husband traded with men like you. Once.' },
+  { name: 'Jedediah Pike',    taunt: 'Run along. Grown folks are doing business.' },
+  { name: 'Iron Sal Moreau',  taunt: 'I can smell your cargo from here. Organics. Cheap ones.' },
+  { name: 'Old Man Calloway', taunt: 'I was running ore out here before your mother was born.' },
+];
+const MERC = ['Brigand','Corsair','Cutthroat','Scav','Raider','Jackal','Wrecker'];
+const RANKS = [[0,'Deckhand'],[10000,'Peddler'],[30000,'Merchant'],[90000,'Trader'],[250000,'Commodore'],[700000,'Tycoon'],[2000000,'Trade Baron']];
+
+// ---------------------------------------------------------------- helpers
+function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+const rnd  = (a, b) => a + Math.random() * (b - a);
+const rint = (a, b) => a + Math.floor(Math.random() * (b - a + 1));
+const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+const fmt  = n => Math.floor(n).toLocaleString('en-US');
+const esc  = s => String(s).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+const c    = (cls, t) => `<span class="${cls}">${esc(t)}</span>`;
+function today(){ const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+const region = id => REGIONS[Math.min(REGIONS.length - 1, Math.floor((id - 1) / 60))];
+
+const $out = document.getElementById('out');
+const $cmd = document.getElementById('cmd');
+function out(html = '', cls = ''){
+  const d = document.createElement('div');
+  if (cls) d.className = cls;
+  d.innerHTML = html;
+  $out.appendChild(d);
+  while ($out.childElementCount > 900) $out.firstChild.remove();
+}
+const say = (t, cls = '') => out(esc(t), cls);
+const err = t => out(c('rd', t));
+
+// ---------------------------------------------------------------- state
+let S = null;
+
+function newGame(){
+  const seed = Math.floor(Math.random() * 2 ** 31);
+  const r = mulberry32(seed);
+  const ri = (a, b) => a + Math.floor(r() * (b - a + 1));
+  const sec = [null];
+  for (let i = 1; i <= N; i++) sec.push({ id: i, warps: [], port: null });
+  const link = (a, b) => {
+    if (a === b) return;
+    if (!sec[a].warps.includes(b)) sec[a].warps.push(b);
+    if (!sec[b].warps.includes(a)) sec[b].warps.push(a);
+  };
+  for (let i = 2; i <= N; i++) link(i, Math.max(1, i - ri(1, 10)));   // spanning tree: every sector reachable
+  for (let i = 1; i <= N; i++) {                                        // local cross-links
+    const want = ri(2, 4);
+    for (let g = 0; g < 25 && sec[i].warps.length < want; g++) {
+      const j = i + ri(-30, 30);
+      if (j >= 1 && j <= N && j !== i && sec[j].warps.length < 6) link(i, j);
+    }
+  }
+  for (let k = 0; k < 12; k++) link(ri(2, N), ri(2, N));                // a few long-haul warps
+  for (let i = 1; i <= N; i++) sec[i].warps.sort((x, y) => x - y);
+
+  const used = new Set();
+  for (let i = 2; i <= N; i++) {
+    if (r() < (i <= 20 ? 0.6 : 0.42)) {
+      let name, tries = 0;
+      do { name = PRE[ri(0, PRE.length - 1)] + ' ' + SUF[ri(0, SUF.length - 1)]; } while (used.has(name) && ++tries < 50);
+      used.add(name);
+      const max = {}, stock = {};
+      for (const cm of COMMS) { max[cm.k] = ri(8, 30) * 100; stock[cm.k] = max[cm.k] * (0.55 + r() * 0.45); }
+      sec[i].port = { name, cls: ri(1, 8), max, stock };
+    }
+  }
+  sec[1].station = true;
+
+  S = {
+    v: 1, seed, day: today(), daysPlayed: 1, turns: TURNS_PER_DAY,
+    sector: 1, prev: 1, docked: false, alive: true, won: false,
+    credits: 2000, ship: { holds: 20, cargo: { ore: 0, org: 0, equ: 0 }, fighters: 30, shields: 50 },
+    kills: 0, baronsKilled: 0, deaths: 0,
+    sectors: sec, known: { 1: 1 }, enemies: [], mercSeq: 1,
+    macros: { home: 'W 1' }, news: [],
+  };
+  BARONS.forEach((b, ix) => S.enemies.push({
+    id: 'b' + ix, kind: 'baron', name: b.name, sector: rint(120, N),
+    fighters: rint(8, 30) * 100, shields: rint(2, 10) * 100, credits: rint(20, 90) * 1000,
+  }));
+  for (let k = 0; k < 8; k++) spawnMerc();
+  addNews('A new trader registers at Yankee Station. Nobody looks up from their drinks.');
+}
+
+function spawnMerc(){
+  const sector = rint(8, N);
+  const f = rint(2, sector <= 60 ? 6 : 25) * 10;   // Yankee Space only sees small-time raiders
+  S.enemies.push({ id: 'm' + S.mercSeq, kind: 'merc', name: pick(MERC) + '-' + S.mercSeq, sector,
+    fighters: f, shields: rint(0, Math.floor(f / 2)), bounty: f * 20 + rint(100, 800) });
+  S.mercSeq++;
+}
+
+function save(){ try { localStorage.setItem(SAVE_KEY, JSON.stringify(S)); } catch (e) { /* storage unavailable: play continues in memory */ } }
+function load(){
+  try { const raw = localStorage.getItem(SAVE_KEY); if (raw) { const d = JSON.parse(raw); if (d && d.v === 1) return d; } } catch (e) {}
+  return null;
+}
+function addNews(t){ S.news.push(`Day ${S.daysPlayed}: ${t}`); if (S.news.length > 60) S.news.shift(); }
+
+// ---------------------------------------------------------------- world queries
+const cur  = () => S.sectors[S.sector];
+const here = () => S.enemies.filter(e => e.sector === S.sector);
+const holdsUsed = () => S.ship.cargo.ore + S.ship.cargo.org + S.ship.cargo.equ;
+const portBuys = (p, i) => CLS[p.cls][i] === 'B';
+function price(p, i){
+  const cm = COMMS[i], ratio = p.stock[cm.k] / p.max[cm.k];
+  // A selling port gets pricier as it runs low; a buying port pays less as its demand is filled.
+  return Math.max(1, Math.round(portBuys(p, i) ? cm.base * (0.85 + 0.55 * ratio) : cm.base * (1.25 - 0.45 * ratio)));
+}
+function netWorth(){
+  const cargo = COMMS.reduce((s, cm) => s + S.ship.cargo[cm.k] * cm.base, 0);
+  return S.credits + cargo + S.ship.fighters * 50 + S.ship.shields * 20 + (S.ship.holds - 20) * 600;
+}
+function rankName(w){ let n = RANKS[0][1]; for (const [min, name] of RANKS) if (w >= min) n = name; return n; }
+function parseComm(s){
+  if (!s) return -1;
+  s = s.toLowerCase();
+  if (['o','f','ore','fuel','fuelore'].includes(s)) return 0;
+  if (['g','org','orgs','organic','organics'].includes(s)) return 1;
+  if (['e','eq','equ','equip','equipment'].includes(s)) return 2;
+  return -1;
+}
+function findPath(from, to){
+  const prev = new Array(N + 1).fill(0);
+  prev[from] = -1;
+  const q = [from];
+  while (q.length) {
+    const x = q.shift();
+    if (x === to) break;
+    for (const w of S.sectors[x].warps) if (!prev[w]) { prev[w] = x; q.push(w); }
+  }
+  if (!prev[to]) return null;
+  const p = [];
+  for (let x = to; x !== -1; x = prev[x]) p.unshift(x);
+  return p;
+}
+
+// ---------------------------------------------------------------- time
+function dayCheck(){
+  const t = today();
+  if (S.day === t) return;
+  S.day = t; S.daysPlayed++; S.turns = TURNS_PER_DAY;
+  for (let i = 1; i <= N; i++) {
+    const p = S.sectors[i].port; if (!p) continue;
+    for (const cm of COMMS) p.stock[cm.k] = Math.min(p.max[cm.k], p.stock[cm.k] + p.max[cm.k] * 0.25);
+  }
+  for (const e of S.enemies) if (e.kind === 'baron') {
+    e.fighters = Math.round(e.fighters * 1.05); e.shields = Math.round(e.shields * 1.03); e.credits = Math.round(e.credits * 1.06);
+  }
+  while (S.enemies.filter(e => e.kind === 'merc').length < 10) spawnMerc();
+  out('');
+  out(c('banner', `*** DAY ${S.daysPlayed} *** The sysop ran maintenance. ${TURNS_PER_DAY} turns on the clock.`));
+  if (!S.alive) {
+    S.alive = true;
+    out(c('hi', 'A new hull is waiting for you at Yankee Station. Try not to waste this one.'));
+  }
+  addNews('Ports restocked overnight. The barons grew fatter.');
+}
+
+function worldTick(){
+  for (let i = 1; i <= N; i++) {
+    const p = S.sectors[i].port; if (!p) continue;
+    for (const cm of COMMS) if (p.stock[cm.k] < p.max[cm.k]) p.stock[cm.k] = Math.min(p.max[cm.k], p.stock[cm.k] + p.max[cm.k] * 0.003);
+  }
+  for (const e of S.enemies) {
+    if (Math.random() < (e.kind === 'baron' ? 0.06 : 0.2)) {
+      const w = S.sectors[e.sector].warps.filter(x => x !== 1);   // nobody fights inside Yankee Station's guns
+      if (w.length) e.sector = pick(w);
+    }
+    if (e.kind === 'baron') {
+      e.credits += rint(20, 120);
+      if (Math.random() < 0.004) baronGossip(e);
+    }
+  }
+  if (S.enemies.filter(e => e.kind === 'merc').length < 10 && Math.random() < 0.03) spawnMerc();
+}
+
+function baronGossip(e){
+  const s = rint(2, N);
+  addNews(pick([
+    `${e.name} cornered the ore market around sector ${s}.`,
+    `${e.name} bought out a port in sector ${s} and fired everyone.`,
+    `${e.name} was seen near sector ${e.sector} with a fresh wing of fighters.`,
+    `A freighter crew in sector ${s} swears ${e.name} cheated them at cards.`,
+  ]));
+}
+
+// ---------------------------------------------------------------- display
+function showSector(){
+  const s = cur();
+  out('');
+  out(c('dim', 'Sector  : ') + c('hi', String(s.id)) + c('dim', ' in ') + esc(region(s.id)));
+  if (s.station) out(c('dim', 'Port    : ') + c('am', 'Yankee Station') + c('dim', ' (shipyard, safe harbor)'));
+  else if (s.port) out(c('dim', 'Port    : ') + c('am', s.port.name) + c('dim', `, Class ${s.port.cls} (${CLS[s.port.cls]})`));
+  else out(c('dim', 'Port    : none'));
+  here().forEach((e, ix) => out(c('dim', ix ? '          ' : 'Ships   : ') + c('rd', `${ix + 1}) ${e.name}`) +
+    c('dim', ` ${fmt(e.fighters)} ftrs${e.kind === 'baron' ? ', Trade Baron' : ''}`)));
+  out(c('dim', 'Warps to: ') + s.warps.map(w => S.known[w] ? esc(w) : c('dim', `(${w})`)).join(c('dim', ' - ')));
+}
+
+function help(){
+  const rows = [
+    ['<n>', 'Warp to sector n (plots a course if far)'],
+    ['D', 'Display this sector'],
+    ['P', 'Dock at port, show prices'],
+    ['B item [qty]', 'Buy (ore, org, equ). No qty = max'],
+    ['S item|all [qty]', 'Sell to the port'],
+    ['T', 'Auto-trade: sell all, buy cheapest'],
+    ['C n', 'Computer: plot course to n'],
+    ['W n', 'Autopilot to n (stops for trouble)'],
+    ['K', 'Ports you have visited'],
+    ['PAIRS', 'Neighboring ports worth trading'],
+    ['U', 'Shipyard (sector 1 only)'],
+    ['A [ftrs] [#]', 'Attack a ship here'],
+    ['R', 'Retreat to the last sector'],
+    ['I', 'Ship and trader info'],
+    ['N / RANK', 'News / standings'],
+    ['MACRO name = a; b; c', 'Record a macro'],
+    ['RUN name [times]', 'Play a macro back'],
+    ['NEW', 'Scrap this game'],
+  ];
+  out('');
+  out(c('am', '-=-=- COMMANDS -=-=-'));
+  for (const [k, v] of rows) out(c('hi', k.padEnd(21)) + c('dim', v));
+  out(c('dim', 'Moving and docking cost 1 turn each. Turns reset at midnight, your time.'));
+  out(c('dim', 'Chain commands with ";"  e.g.  12; T; 7; T'));
+}
+
+function info(){
+  const w = netWorth(), sh = S.ship;
+  out('');
+  out(c('am', `-=-=- ${rankName(w).toUpperCase()} -=-=-`));
+  out(c('dim', 'Net worth : ') + c('hi', fmt(w) + ' cr'));
+  out(c('dim', 'Credits   : ') + c('hi', fmt(S.credits)));
+  out(c('dim', 'Holds     : ') + c('hi', `${holdsUsed()}/${sh.holds}`) + c('dim', `  ore ${sh.cargo.ore}  org ${sh.cargo.org}  equ ${sh.cargo.equ}`));
+  out(c('dim', 'Fighters  : ') + c('hi', fmt(sh.fighters)) + c('dim', '   Shields: ') + c('hi', fmt(sh.shields)));
+  out(c('dim', 'Turns left: ') + c('hi', String(S.turns)) + c('dim', `   Day ${S.daysPlayed}`));
+  out(c('dim', 'Kills     : ') + c('hi', String(S.kills)) + c('dim', `   Barons down: ${S.baronsKilled}/5   Deaths: ${S.deaths}`));
+}
+
+function knownPorts(){
+  const list = [];
+  for (const id in S.known) { const s = S.sectors[id]; if (s && s.port) list.push(s); }
+  out('');
+  if (!list.length) { out(c('dim', 'No ports on file. Get out there and dock somewhere.')); return; }
+  out(c('am', `-=-=- PORTS ON FILE (${list.length}) -=-=-`));
+  list.sort((a, b) => a.id - b.id).forEach(s => out(c('hi', String(s.id).padStart(4)) + '  ' + c('cy', CLS[s.port.cls]) + '  ' + esc(s.port.name)));
+}
+
+function pairs(){
+  const found = [];
+  for (const id in S.known) {
+    const a = S.sectors[id]; if (!a || !a.port) continue;
+    for (const bid of a.warps) {
+      if (bid <= a.id || !S.known[bid]) continue;
+      const b = S.sectors[bid]; if (!b.port) continue;
+      const ab = [], ba = [];
+      COMMS.forEach((cm, i) => {
+        if (!portBuys(a.port, i) && portBuys(b.port, i)) ab.push(cm.k);
+        if (!portBuys(b.port, i) && portBuys(a.port, i)) ba.push(cm.k);
+      });
+      if (ab.length || ba.length) found.push({ a: a.id, b: b.id, ab, ba, two: ab.length && ba.length });
+    }
+  }
+  out('');
+  if (!found.length) { out(c('dim', 'No trade pairs on file yet. Visit ports next door to each other.')); return; }
+  found.sort((x, y) => (y.two - x.two) || (y.ab.length + y.ba.length - x.ab.length - x.ba.length));
+  out(c('am', '-=-=- TRADE PAIRS -=-=-'));
+  for (const p of found.slice(0, 14)) {
+    out(c('hi', `${p.a} <-> ${p.b}`) + (p.two ? c('am', '  TWO-WAY') : '') +
+      c('dim', `  ${p.a}>${p.b}: ${p.ab.join(',') || '-'}  ${p.b}>${p.a}: ${p.ba.join(',') || '-'}`));
+  }
+  out(c('dim', 'Two-way pairs pay both directions. Macro it:  MACRO run = ' + found[0].a + '; T; ' + found[0].b + '; T'));
+}
+
+function news(){
+  out('');
+  out(c('am', '-=-=- THE DAILY MANIFEST -=-=-'));
+  S.news.slice(-12).reverse().forEach(n => out(c('dim', n)));
+}
+
+function rank(){
+  const rows = [{ name: 'You', w: netWorth(), you: true }];
+  for (const e of S.enemies) if (e.kind === 'baron') rows.push({ name: e.name, w: e.credits + e.fighters * 50 });
+  rows.sort((a, b) => b.w - a.w);
+  out('');
+  out(c('am', '-=-=- STANDINGS -=-=-'));
+  rows.forEach((r, i) => out((r.you ? c('hi', `${i + 1}. ${r.name}`.padEnd(22)) : c('dim', `${i + 1}. ${r.name}`.padEnd(22))) + c(r.you ? 'hi' : 'dim', fmt(r.w).padStart(11) + ' cr')));
+}
+
+// ---------------------------------------------------------------- actions
+function canAct(){
+  if (!S.alive) { err('You are drifting in an escape pod. New ship tomorrow.'); return false; }
+  if (S.turns <= 0) { err('Out of turns for today. Come back after midnight, sailor.'); return false; }
+  return true;
+}
+
+function move(n){
+  if (!Number.isInteger(n) || n < 1 || n > N) { err(`Sectors run 1 to ${N}.`); return false; }
+  if (n === S.sector) { showSector(); return true; }
+  if (!cur().warps.includes(n)) { say(`No direct warp to ${n}. Plotting a course...`, 'dim'); return autowarp(String(n)); }
+  if (!canAct()) return false;
+  S.prev = S.sector; S.sector = n; S.turns--; S.known[n] = 1; S.docked = false;
+  worldTick();
+  showSector();
+  return encounter();
+}
+
+function encounter(){
+  for (const e of here()) {
+    if (!S.alive) break;
+    if (e.kind === 'merc') {
+      if (e.fighters > S.ship.fighters * 0.5 && Math.random() < 0.5) enemyAttacks(e);
+      else out(c('dim', `${e.name} sizes you up and keeps its distance.`));
+    } else {
+      const b = BARONS.find(x => x.name === e.name);
+      out(c('rd', `${e.name}: `) + c('hi', `"${b ? b.taunt : 'Get out of my sector.'}"`));
+      // Barons don't waste fighters on small fry. Get rich and they notice you.
+      if (netWorth() >= 30000 && Math.random() < 0.4) enemyAttacks(e);
+      else if (netWorth() < 30000) out(c('dim', `${e.name} decides you are not worth the fuel.`));
+    }
+  }
+  return S.alive && here().length === 0;   // any company stops autopilot and macros
+}
+
+// A wave of `sent` fighters from att hits def. Shields soak first, then fighters.
+function battle(att, def, sent){
+  const power = sent * rnd(0.85, 1.15);
+  const defPower = def.fighters + def.shields;
+  att.fighters -= sent;
+  if (power > defPower) {
+    const lost = Math.min(sent, Math.ceil(defPower * rnd(0.45, 0.75)));
+    att.fighters += sent - lost;
+    def.fighters = 0; def.shields = 0;
+    return { win: true, lost };
+  }
+  let dmg = Math.floor(sent * rnd(0.6, 0.95));
+  const sh = Math.min(def.shields, dmg); def.shields -= sh; dmg -= sh;
+  const fl = Math.min(def.fighters, dmg); def.fighters -= fl;
+  return { win: false, lost: sent, sh, fl };
+}
+
+function enemyAttacks(e){
+  if (e.fighters < 1) return;
+  const sent = Math.max(1, Math.ceil(e.fighters * rnd(0.45, 0.85)));
+  out(c('rd', `!! ${e.name} launches ${fmt(sent)} fighters at you !!`));
+  const me = { fighters: S.ship.fighters, shields: S.ship.shields };
+  const r = battle(e, me, sent);
+  if (r.win) { playerDies(e); return; }
+  S.ship.fighters = me.fighters; S.ship.shields = me.shields;
+  out(c('dim', 'You hold. Shields soak ') + c('hi', fmt(r.sh)) + c('dim', ', you lose ') + c('rd', fmt(r.fl) + ' fighters') +
+    c('dim', `. ${e.name} burns ${fmt(sent)}.`));
+  if (e.fighters < 1) {
+    const w = S.sectors[e.sector].warps.filter(x => x !== 1);
+    if (w.length) e.sector = pick(w);
+    out(c('dim', `${e.name} is out of fighters and limps off.`));
+  }
+}
+
+function playerDies(killer){
+  S.alive = false; S.deaths++; S.turns = 0;
+  S.credits = Math.floor(S.credits * 0.9);
+  S.ship = { holds: 20, cargo: { ore: 0, org: 0, equ: 0 }, fighters: 30, shields: 50 };
+  S.sector = 1; S.prev = 1; S.docked = false;
+  out('');
+  out(c('rd', '*** YOUR SHIP HAS BEEN DESTROYED ***'));
+  out(c('dim', `${killer.name} picks through what is left of your cargo.`));
+  out(c('dim', 'Your escape pod limps back to Yankee Station. The salvage office takes 10%.'));
+  out(c('dim', 'You are done for today. A new hull will be ready tomorrow.'));
+  addNews(`${killer.name} blew a trader out of the sky in sector ${killer.sector}.`);
+}
+
+function attack(a){
+  if (!canAct()) return false;
+  const foes = here();
+  if (!foes.length) { err('Nothing here to shoot at.'); return false; }
+  const n = a[0] !== undefined ? parseInt(a[0], 10) : S.ship.fighters;
+  const ti = a[1] !== undefined ? parseInt(a[1], 10) - 1 : 0;
+  if (isNaN(n) || n < 1) { err('Usage: A [fighters] [target#]'); return false; }
+  if (n > S.ship.fighters) { err(`You only have ${fmt(S.ship.fighters)} fighters.`); return false; }
+  const e = foes[ti];
+  if (!e) { err(`No target #${ti + 1} here.`); return false; }
+  S.turns--;
+  out(c('hi', `You launch ${fmt(n)} fighters at ${e.name}...`));
+  const me = { fighters: S.ship.fighters, shields: S.ship.shields };
+  const r = battle(me, e, n);
+  S.ship.fighters = me.fighters;
+  if (r.win) {
+    out(c('am', `${e.name} comes apart in a white flash.`) + c('dim', ` You lost ${fmt(r.lost)} fighters.`));
+    destroyEnemy(e);
+  } else {
+    out(c('dim', 'Not enough. They lose ') + c('hi', `${fmt(r.sh)} shields, ${fmt(r.fl)} fighters`) + c('dim', `. Your ${fmt(n)} are gone.`));
+    if (e.fighters > 0 && Math.random() < 0.6) enemyAttacks(e);
+  }
+  return S.alive && here().length === 0;
+}
+
+function destroyEnemy(e){
+  S.enemies = S.enemies.filter(x => x !== e);
+  S.kills++;
+  const bounty = e.kind === 'baron' ? e.credits : e.bounty;
+  S.credits += bounty;
+  out(c('am', `Bounty paid: ${fmt(bounty)} credits.`));
+  if (e.kind === 'baron') {
+    S.baronsKilled++;
+    addNews(`${e.name} is dead. Their empire is up for grabs.`);
+    out(c('banner', `*** ${e.name.toUpperCase()} IS FINISHED. ${5 - S.baronsKilled} barons left. ***`));
+    if (S.baronsKilled >= 5 && !S.won) {
+      S.won = true;
+      out('');
+      out(c('banner', '=============================================='));
+      out(c('banner', ' THE LAST TRADE BARON IS DEAD.'));
+      out(c('hi', ` It took you ${S.daysPlayed} days and ${S.deaths} ships.`));
+      out(c('hi', ' The frontier is yours. Keep trading, or type NEW.'));
+      out(c('banner', '=============================================='));
+      addNews('The barons are gone. Somebody new owns the frontier.');
+    }
+  } else {
+    addNews(`${e.name} was destroyed in sector ${S.sector}.`);
+  }
+}
+
+function retreat(){
+  if (!canAct()) return false;
+  const foes = here();
+  if (!foes.length) { err('Nothing to run from.'); return false; }
+  S.turns--;
+  if (Math.random() < 0.65) {
+    const to = S.prev !== S.sector ? S.prev : pick(cur().warps);
+    out(c('hi', 'You punch it and jump out.'));
+    S.prev = S.sector; S.sector = to; S.known[to] = 1; S.docked = false;
+    worldTick(); showSector(); encounter();
+  } else {
+    out(c('rd', 'Your engines cough. They are on you.'));
+    enemyAttacks(pick(foes));
+  }
+  return false;
+}
+
+function plot(arg){
+  const n = parseInt(arg, 10);
+  if (!(n >= 1 && n <= N)) { err(`Usage: C n  (1 to ${N})`); return null; }
+  const p = findPath(S.sector, n);
+  if (!p) { err('The computer cannot find a route.'); return null; }
+  out(c('dim', `Course (${p.length - 1} hops): `) + p.map(x => S.known[x] ? c('hi', x) : c('dim', `(${x})`)).join(c('dim', ' > ')));
+  return p;
+}
+function autowarp(arg){
+  const p = plot(arg);
+  if (!p) return false;
+  for (const hop of p.slice(1)) {
+    if (!cur().warps.includes(hop)) return false;
+    if (!move(hop)) { if (S.sector !== p[p.length - 1]) out(c('am', 'Autopilot disengaged.')); return false; }
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------- trading
+function dock(){
+  if (S.docked) return true;
+  if (!canAct()) return false;
+  S.turns--; S.docked = true;
+  return true;
+}
+function portCmd(){
+  const s = cur();
+  if (s.station) { stationMenu(); return true; }
+  if (!s.port) { err('No port in this sector.'); return false; }
+  if (!dock()) return false;
+  portReport();
+  return true;
+}
+function portReport(){
+  const p = cur().port;
+  out('');
+  out(c('am', p.name) + c('dim', `  Class ${p.cls} (${CLS[p.cls]})`));
+  out(c('dim', 'Item       Status    Units  Price  Hold'));
+  COMMS.forEach((cm, i) => {
+    const b = portBuys(p, i);
+    out(esc(cm.name.padEnd(11)) + c(b ? 'am' : 'cy', (b ? 'Buying' : 'Selling').padEnd(8)) +
+      esc(fmt(p.stock[cm.k]).padStart(7)) + c('hi', String(price(p, i)).padStart(7)) + esc(String(S.ship.cargo[cm.k]).padStart(6)));
+  });
+  out(c('dim', `Credits ${fmt(S.credits)}  Holds ${holdsUsed()}/${S.ship.holds}  -  B, S, or T to trade`));
+}
+
+function buy(a, quiet){
+  const p = cur().port;
+  if (!p) { err(cur().station ? 'Yankee Station trades in hardware, not cargo. Type U.' : 'No port here.'); return false; }
+  const i = parseComm(a[0]);
+  if (i < 0) { err('Buy what? ore, org, or equ.'); return false; }
+  const cm = COMMS[i];
+  if (portBuys(p, i)) { err(`${p.name} is buying ${cm.name}, not selling it.`); return false; }
+  if (!dock()) return false;
+  const free = S.ship.holds - holdsUsed();
+  const pr = price(p, i);
+  const max = Math.min(free, Math.floor(p.stock[cm.k]), Math.floor(S.credits / pr));
+  if (max < 1) { if (!quiet) err(free < 1 ? 'Your holds are full.' : p.stock[cm.k] < 1 ? 'They are sold out.' : 'You cannot afford a single unit.'); return !!quiet; }
+  let q = a[1] !== undefined && a[1].toLowerCase() !== 'max' ? parseInt(a[1], 10) : max;
+  if (isNaN(q) || q < 1) { err('Quantity has to be a number.'); return false; }
+  q = Math.min(q, max);
+  const before = p.stock[cm.k];
+  p.stock[cm.k] = before - q;
+  let unit = Math.round((pr + price(p, i)) / 2);
+  if (unit * q > S.credits) { q = Math.floor(S.credits / unit); p.stock[cm.k] = before - q; }
+  if (q < 1) { p.stock[cm.k] = before; err('You cannot afford a single unit.'); return false; }
+  S.credits -= unit * q; S.ship.cargo[cm.k] += q;
+  out(c('cy', `Bought ${q} ${cm.name} @ ${unit}`) + c('dim', ` = ${fmt(unit * q)} cr. Credits left ${fmt(S.credits)}.`));
+  return true;
+}
+
+function sellOne(p, i){
+  const cm = COMMS[i];
+  const q = Math.min(S.ship.cargo[cm.k], Math.floor(p.stock[cm.k]));
+  return q;
+}
+function sell(a, quiet){
+  const p = cur().port;
+  if (!p) { err('No port here.'); return false; }
+  const all = !a[0] || a[0].toLowerCase() === 'all';
+  const list = all ? [0, 1, 2].filter(i => portBuys(p, i) && S.ship.cargo[COMMS[i].k] > 0) : [parseComm(a[0])];
+  if (!all && list[0] < 0) { err('Sell what? ore, org, equ, or all.'); return false; }
+  if (!all && !portBuys(p, list[0])) { err(`${p.name} is selling ${COMMS[list[0]].name}, not buying.`); return false; }
+  if (!list.length) { if (!quiet) out(c('dim', 'Nothing in your holds this port wants.')); return true; }
+  if (!dock()) return false;
+  let sold = false;
+  for (const i of list) {
+    const cm = COMMS[i];
+    const max = sellOne(p, i);
+    if (max < 1) { if (!quiet) err(S.ship.cargo[cm.k] < 1 ? `You have no ${cm.name}.` : `${p.name} has no demand left for ${cm.name}.`); continue; }
+    let q = !all && a[1] !== undefined ? parseInt(a[1], 10) : max;
+    if (isNaN(q) || q < 1) { err('Quantity has to be a number.'); return false; }
+    q = Math.min(q, max);
+    const pr = price(p, i);
+    p.stock[cm.k] -= q;
+    const unit = Math.round((pr + price(p, i)) / 2);
+    S.credits += unit * q; S.ship.cargo[cm.k] -= q; sold = true;
+    out(c('am', `Sold ${q} ${cm.name} @ ${unit}`) + c('dim', ` = ${fmt(unit * q)} cr. Credits ${fmt(S.credits)}.`));
+  }
+  return sold || !!quiet;
+}
+
+function autoTrade(){
+  const s = cur();
+  if (!s.port) { err(s.station ? 'Yankee Station is a shipyard. Type U.' : 'No port here.'); return false; }
+  if (!dock()) return false;
+  const p = s.port;
+  sell(['all'], true);
+  let best = -1, bestRatio = Infinity;
+  COMMS.forEach((cm, i) => {
+    if (portBuys(p, i) || p.stock[cm.k] < 1) return;
+    const r = price(p, i) / cm.base;
+    if (r < bestRatio) { bestRatio = r; best = i; }
+  });
+  if (best >= 0 && holdsUsed() < S.ship.holds) buy([COMMS[best].k], true);
+  else if (best < 0) out(c('dim', `${p.name} has nothing for sale.`));
+  return true;
+}
+
+// ---------------------------------------------------------------- shipyard
+const HOLD_MAX = 150, FTR_MAX = 20000, SHD_MAX = 5000, FTR_COST = 60, SHD_COST = 25;
+const holdCost = (from, n) => { let t = 0; for (let h = from; h < from + n; h++) t += 200 + 15 * h; return t; };
+function stationMenu(){
+  out('');
+  out(c('am', '-=-=- YANKEE STATION SHIPYARD -=-=-'));
+  out(c('dim', 'A bored clerk slides a price sheet across the counter.'));
+  out(c('hi', 'U H n') + c('dim', `  cargo hold   ${fmt(200 + 15 * S.ship.holds)} cr next  (${S.ship.holds}/${HOLD_MAX})`));
+  out(c('hi', 'U F n') + c('dim', `  fighter      ${FTR_COST} cr each   (${fmt(S.ship.fighters)})`));
+  out(c('hi', 'U S n') + c('dim', `  shield       ${SHD_COST} cr each   (${fmt(S.ship.shields)})`));
+  out(c('dim', `n can be "max". Credits: ${fmt(S.credits)}`));
+}
+function upgrade(a){
+  if (!cur().station) { err('The shipyard is at Yankee Station, sector 1. Type W 1.'); return false; }
+  if (!a.length) { stationMenu(); return true; }
+  if (!S.alive) { err('Your new hull is not ready until tomorrow.'); return false; }
+  const what = a[0][0].toUpperCase();
+  const isMax = (a[1] || '').toLowerCase() === 'max';
+  let n = isMax ? Infinity : parseInt(a[1] || '1', 10);
+  if (isNaN(n) || n < 1) { err('Usage: U H|F|S n'); return false; }
+  if (what === 'H') {
+    n = Math.min(n, HOLD_MAX - S.ship.holds);
+    while (n > 0 && holdCost(S.ship.holds, n) > S.credits) n--;
+    if (n < 1) { err(S.ship.holds >= HOLD_MAX ? 'Your hull cannot take more holds.' : 'You cannot afford a hold.'); return false; }
+    const cost = holdCost(S.ship.holds, n);
+    S.credits -= cost; S.ship.holds += n;
+    out(c('am', `Welders add ${n} hold${n > 1 ? 's' : ''}.`) + c('dim', ` ${fmt(cost)} cr. Holds now ${S.ship.holds}.`));
+  } else if (what === 'F' || what === 'S') {
+    const fighters = what === 'F';
+    const unit = fighters ? FTR_COST : SHD_COST, cap = fighters ? FTR_MAX : SHD_MAX;
+    const have = fighters ? S.ship.fighters : S.ship.shields;
+    n = Math.min(n, cap - have, Math.floor(S.credits / unit));
+    if (n < 1) { err(have >= cap ? 'You are at the limit.' : 'You cannot afford one.'); return false; }
+    S.credits -= n * unit;
+    if (fighters) S.ship.fighters += n; else S.ship.shields += n;
+    out(c('am', `Loaded ${fmt(n)} ${fighters ? 'fighters' : 'shield units'}.`) + c('dim', ` ${fmt(n * unit)} cr.`));
+  } else { err('U H, U F, or U S.'); return false; }
+  return true;
+}
+
+// ---------------------------------------------------------------- macros
+function macroCmd(rest){
+  rest = rest.trim();
+  if (!rest) {
+    const names = Object.keys(S.macros);
+    out('');
+    if (!names.length) { out(c('dim', 'No macros. Try:  MACRO loop = 12; T; 7; T')); return true; }
+    out(c('am', '-=-=- MACROS -=-=-'));
+    names.forEach(nm => out(c('hi', nm.padEnd(10)) + c('dim', S.macros[nm])));
+    out(c('dim', 'RUN name [times].  MACRO name =  (empty) deletes.'));
+    return true;
+  }
+  const m = rest.match(/^(\w+)\s*(=\s*([\s\S]*))?$/);
+  if (!m) { err('Usage: MACRO name = cmd; cmd; cmd'); return false; }
+  const name = m[1].toLowerCase();
+  if (m[2] === undefined) {
+    if (S.macros[name]) out(c('hi', name) + c('dim', ' = ' + S.macros[name]));
+    else err(`No macro named ${name}.`);
+    return !!S.macros[name];
+  }
+  const body = m[3].trim();
+  if (!body) { delete S.macros[name]; out(c('dim', `Macro ${name} deleted.`)); return true; }
+  if (Object.keys(S.macros).length >= 20 && !S.macros[name]) { err('20 macros max. Delete one first.'); return false; }
+  S.macros[name] = body.slice(0, 300);
+  out(c('am', `Macro ${name} saved.`) + c('dim', ` RUN ${name} 10 to run it ten times.`));
+  return true;
+}
+function runMacro(a, depth){
+  const name = (a[0] || '').toLowerCase();
+  const body = S.macros[name];
+  if (!body) { err(name ? `No macro named ${name}. Type MACRO to list them.` : 'Usage: RUN name [times]'); return false; }
+  if (depth > 3) { err('Macros nested too deep.'); return false; }
+  const times = Math.max(1, Math.min(99, parseInt(a[1] || '1', 10) || 1));
+  const steps = body.split(';').map(x => x.trim()).filter(Boolean);
+  for (let t = 1; t <= times; t++) {
+    if (times > 1) out(c('dim', `-- ${name} pass ${t}/${times} --`));
+    for (const step of steps) {
+      out(c('dim', '> ') + c('hi', step));
+      if (!runCmd(step, depth + 1)) { out(c('am', `Macro ${name} halted.`)); return false; }
+    }
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------- command dispatch
+let pendingNew = false;
+function runCmd(raw, depth = 0){
+  dayCheck();
+  const t = raw.trim();
+  if (!t) return true;
+  const parts = t.split(/\s+/);
+  const cmd = parts[0].toUpperCase();
+  const a = parts.slice(1);
+  if (/^\d+$/.test(cmd)) return move(parseInt(cmd, 10));
+  if (cmd !== 'NEW') pendingNew = false;
+  switch (cmd) {
+    case '?': case 'H': case 'HELP': help(); return true;
+    case 'D': case 'L': showSector(); return true;
+    case 'M': return move(parseInt(a[0], 10));
+    case 'P': return portCmd();
+    case 'B': case 'BUY': return buy(a);
+    case 'S': case 'SELL': return sell(a);
+    case 'T': case 'TRADE': return autoTrade();
+    case 'I': info(); return true;
+    case 'C': return !!plot(a[0]);
+    case 'W': return autowarp(a[0]);
+    case 'K': knownPorts(); return true;
+    case 'PAIRS': pairs(); return true;
+    case 'U': return upgrade(a);
+    case 'A': return attack(a);
+    case 'R': return retreat();
+    case 'N': case 'NEWS': news(); return true;
+    case 'RANK': rank(); return true;
+    case 'MACRO': case 'MACROS': return macroCmd(t.slice(parts[0].length));
+    case 'RUN': return runMacro(a, depth);
+    case 'CLS': $out.innerHTML = ''; return true;
+    case 'NEW':
+      if ((a[0] || '').toUpperCase() === 'YES' || pendingNew) {
+        pendingNew = false; newGame(); $out.innerHTML = ''; intro(); return true;
+      }
+      pendingNew = true;
+      out(c('rd', 'This scraps your ship, credits, and galaxy. Type NEW again to confirm.'));
+      return true;
+    default:
+      err(`Unknown command "${parts[0]}". Type ? for help.`);
+      return false;
+  }
+}
+
+function execLine(line){
+  if (/^\s*macros?\b/i.test(line)) return runCmd(line);
+  for (const part of line.split(';')) {
+    if (!part.trim()) continue;
+    if (!runCmd(part)) return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------- UI
+const $status = document.getElementById('status');
+const $keys = document.getElementById('keys');
+const $prompt = document.getElementById('prompt');
+
+function render(){
+  const sh = S.ship;
+  $status.innerHTML =
+    `<span>Sec <b>${S.sector}</b></span><span>Turns <b>${S.turns}</b></span><span>Cr <b>${fmt(S.credits)}</b></span>` +
+    `<span>Holds <b>${holdsUsed()}/${sh.holds}</b></span><span>Ftrs <b>${fmt(sh.fighters)}</b></span><span>Shds <b>${fmt(sh.shields)}</b></span>` +
+    `<span>Day <b>${S.daysPlayed}</b></span>`;
+  $prompt.innerHTML = `<span class="long">Command </span>[TL=${S.turns}]:[${S.sector}] ?`;
+  const keys = [];
+  const s = cur();
+  if (here().length) { keys.push(['A', 'Attack', 'foe']); keys.push(['R', 'Retreat', 'foe']); }
+  for (const w of s.warps) keys.push([String(w), (S.known[w] ? '' : '?') + w, 'warp']);
+  if (s.station) keys.push(['U', 'Shipyard', 'shop']);
+  if (s.port) { keys.push(['P', 'Port', 'shop']); keys.push(['T', 'Trade', 'shop']); }
+  if (S.sector !== 1) keys.push(['W 1', 'Home', '']);
+  keys.push(['D', 'Sector', ''], ['I', 'Ship', ''], ['PAIRS', 'Pairs', ''], ['?', 'Help', '']);
+  $keys.innerHTML = keys.map(([cmd, label, cls]) =>
+    `<button type="button" class="${cls}" data-cmd="${esc(cmd)}">${esc(label)}</button>`).join('');
+}
+
+const history = [];
+let hIdx = 0;
+function submit(line){
+  const echo = `Command [TL=${S.turns}]:[${S.sector}] ? `;
+  out(c('echo', echo) + `<span class="echo"><span class="cmd">${esc(line)}</span></span>`);
+  if (line.trim()) { history.push(line); if (history.length > 50) history.shift(); }
+  hIdx = history.length;
+  execLine(line);
+  save();
+  render();
+  $out.scrollTop = $out.scrollHeight;
+}
+
+document.getElementById('f').addEventListener('submit', ev => {
+  ev.preventDefault();
+  const v = $cmd.value;
+  $cmd.value = '';
+  submit(v);
+});
+$cmd.addEventListener('keydown', ev => {
+  if (ev.key === 'ArrowUp' && hIdx > 0) { hIdx--; $cmd.value = history[hIdx]; ev.preventDefault(); }
+  else if (ev.key === 'ArrowDown') { hIdx = Math.min(history.length, hIdx + 1); $cmd.value = history[hIdx] || ''; ev.preventDefault(); }
+});
+$keys.addEventListener('click', ev => {
+  const b = ev.target.closest('button[data-cmd]');
+  if (b) submit(b.dataset.cmd);
+});
+
+function intro(){
+  out(c('banner', '+------------------------------------+'));
+  out(c('banner', '|   Y A N K E E    T R A D E R       |'));
+  out(c('banner', '+------------------------------------+'));
+  out('');
+  out(esc('The Federation went broke and sold the frontier to five trade barons. They run the ports, they run the mercs, and they run anybody who gets in the way.'));
+  out('');
+  out(esc('You have 2,000 credits, a 20-hold freighter, 50 shields, and 30 fighters with more nerve than sense.'));
+  out(c('hi', 'Buy cheap. Sell dear. Kill a baron if you can.'));
+  out(c('dim', `${TURNS_PER_DAY} turns a day. Type ? for commands, or tap a sector to warp.`));
+  out(c('dim', 'Tip: find two ports next door that buy what the other sells, then  MACRO loop = 12; T; 7; T  and  RUN loop 10'));
+  out('');
+  out(c('dim', "Unofficial tribute to Alan Davenport's Yankee Trader door game."));
+  showSector();
+  render();
+}
+
+function start(data){
+  S = (data && data.S) || load();
+  if (!S) { newGame(); intro(); save(); }
+  else {
+    out(c('banner', `Welcome back, ${rankName(netWorth())}. Day ${S.daysPlayed}.`));
+    dayCheck();
+    showSector();
+    render();
+  }
+  $out.scrollTop = $out.scrollHeight;
+  if (window.matchMedia && matchMedia('(pointer: fine)').matches) $cmd.focus();
+}
+
+const hot = window.claude && window.claude.hot;
+if (hot && typeof hot.snapshot === 'function') hot.snapshot(() => ({ S }));
+if (hot && typeof hot.ready === 'function') hot.ready(start);
+else start(hot && hot.data ? hot.data : {});
+</script>
+</body>
+</html>
