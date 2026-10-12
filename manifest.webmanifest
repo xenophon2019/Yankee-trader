@@ -1,0 +1,16 @@
+{
+  "name": "Yankee Trader",
+  "short_name": "Yankee Trader",
+  "description": "A green-phosphor remake of the BBS door game. Trade between ports, hunt five trade barons, 250 turns a day.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#040905",
+  "theme_color": "#040905",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

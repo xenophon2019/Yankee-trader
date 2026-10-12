@@ -4,10 +4,21 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Yankee Trader</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=VT323&family=Silkscreen:wght@400;700&display=swap">
+<meta name="description" content="A green-phosphor remake of the BBS door game. Trade between ports, hunt five trade barons, 250 turns a day.">
+<meta name="theme-color" content="#040905">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Yankee Trader">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="preload" href="fonts/vt323.woff2" as="font" type="font/woff2" crossorigin>
 <style>
+/* Fonts ship with the game (SIL OFL, see fonts/) so it plays offline. */
+@font-face { font-family: 'VT323'; font-style: normal; font-weight: 400; font-display: swap; src: url(fonts/vt323.woff2) format('woff2'); }
+@font-face { font-family: 'Silkscreen'; font-style: normal; font-weight: 700; font-display: swap; src: url(fonts/silkscreen-700.woff2) format('woff2'); }
+
 /* Layout: one-screen BBS terminal. Status line on top, scrollback in the middle,
    quick-keys and the command prompt pinned to the bottom. Deliberately single-theme: a P1 phosphor CRT. */
 :root {
@@ -24,7 +35,7 @@
   --font-title: 'Silkscreen', 'VT323', 'Courier New', monospace;
   color-scheme: dark;
 }
-html, body { height: 100%; }
+html, body { height: 100%; overscroll-behavior: none; }
 body {
   margin: 0; background: var(--bg); color: var(--fg);
   font-family: var(--font-term); font-size: 21px; line-height: 1.15;
@@ -32,7 +43,9 @@ body {
 }
 .crt {
   box-sizing: border-box; height: 100%; max-width: 980px; margin: 0 auto;
-  padding-inline: 16px; padding-block: 10px 8px;
+  /* Clear the iPhone notch and home bar when running full screen from the home screen. */
+  padding-inline: max(16px, env(safe-area-inset-left)) max(16px, env(safe-area-inset-right));
+  padding-block: max(10px, env(safe-area-inset-top)) max(8px, env(safe-area-inset-bottom));
   display: flex; flex-direction: column; gap: 8px; position: relative;
 }
 .crt::after { /* scanlines */
@@ -62,6 +75,7 @@ h1 small { font-family: var(--font-term); font-weight: 400; font-size: 18px; col
 #keys button {
   font: inherit; font-size: 19px; color: var(--fg); background: var(--bg-raise);
   border: 1px solid var(--line); padding: 2px 9px; cursor: pointer; text-shadow: inherit;
+  touch-action: manipulation; -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
 }
 #keys button.warp { color: var(--hi); }
 #keys button.foe { color: var(--red); border-color: color-mix(in srgb, var(--red) 40%, var(--line)); }
@@ -903,6 +917,11 @@ const hot = window.claude && window.claude.hot;
 if (hot && typeof hot.snapshot === 'function') hot.snapshot(() => ({ S }));
 if (hot && typeof hot.ready === 'function') hot.ready(start);
 else start(hot && hot.data ? hot.data : {});
+
+// Offline support + home-screen install. Only works when served over http(s), not from a double-clicked file.
+if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => {}); });
+}
 </script>
 </body>
 </html>
